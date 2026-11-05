@@ -3,13 +3,21 @@ document.getElementById('runButton').addEventListener('click', function () {
     const vars = document.getElementById('variantInput').value;
     const org = document.getElementById('queryOrganism').value;
 
+    showError('');
 
     fetch('/run_variants', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ variants: vars, organism: org})
     })
-    .then(res => res.json())
+    .then(async res => {
+        // The server sends {error: message} when the analysis fails
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error) {
+            throw new Error(data.error || 'The analysis could not be completed. Please confirm that the Organism setting matches your coordinates.');
+        }
+        return data;
+    })
     .then(data => {
         // store full results
         window.fullJSON = data;
@@ -17,8 +25,49 @@ document.getElementById('runButton').addEventListener('click', function () {
         // build sidebar
         buildSidebar(data);
     })
-    .catch(err => {console.error(err);});
+    .catch(err => {
+        console.error(err);
+
+        // Hide results from any earlier search so they aren't mistaken for this one
+        window.fullJSON = undefined;
+        document.getElementById('layoutOutput').style.display = 'none';
+        showError(err.message);
+    });
 });
+
+
+// Show a message under the Submit button; an empty message hides it
+function showError(message) {
+    const box = document.getElementById('errorMessage');
+    box.textContent = message;
+    box.hidden = !message;
+}
+
+
+
+// Sort score rows so each allele's transcripts stay together
+function groupedScoreSort(scores) {
+    // Each allele's best transcript score decides where the group lands;
+    // within an allele, transcripts sort by their own Total Score.
+    const bestByAllele = {};
+    scores.forEach(row => {
+        const aid = row['AlleleID'];
+        const s = row['Total Score'] ?? 0;
+        if (bestByAllele[aid] === undefined || s > bestByAllele[aid]) {
+            bestByAllele[aid] = s;
+        }
+    });
+
+    return [...scores].sort((a, b) => {
+        const aBest = bestByAllele[a['AlleleID']] ?? 0;
+        const bBest = bestByAllele[b['AlleleID']] ?? 0;
+        if (bBest !== aBest) return bBest - aBest;              // allele groups by best score
+        if (a['AlleleID'] !== b['AlleleID']) {
+            return String(a['AlleleID']).localeCompare(b['AlleleID']);  // stable tiebreak between alleles
+        }
+        return (b['Total Score'] ?? 0) - (a['Total Score'] ?? 0);  // within an allele
+    });
+}
 
 
 // Build the sidebar with one button per input variant
@@ -90,7 +139,7 @@ function renderTables(name, gene) {
         phenotypes = window.fullJSON.phenotypes.filter(row => row['Gene Symbol'] === homolog);
 
         // Sort output proteins and score dataframes
-        sortedScores = [...scores].sort((a, b) => (b['Total Score'] ?? 0) - (a['Total Score'] ?? 0));
+        sortedScores = groupedScoreSort(scores);
         const rank = new Map(sortedScores.map((row, index) => [`${row['AlleleID']}||${row['Transcript ID']}`, index]));
 
         console.log(rank)
@@ -116,7 +165,7 @@ function renderTables(name, gene) {
         phenotypes = window.fullJSON.phenotypes.filter(row => outputProteins.some(r => r.Name === row.Name));
 
         // Sort output proteins and score dataframes
-        sortedScores = [...scores].sort((a, b) => (b['Total Score'] ?? 0) - (a['Total Score'] ?? 0));
+        sortedScores = groupedScoreSort(scores);
         const rank = new Map(sortedScores.map((row, index) => [`${row['Name']}||${row['Transcript ID']}`, index]));
 
         console.log(rank)
@@ -261,7 +310,8 @@ function renderTables(name, gene) {
     });
 
     // Columns that are be hidden by default
-    const scoreHiddenCols = ['Input Name'];
+    // MP Terms Mapped/Total are diagnostics for the phenotype scores; they stay in the JSON download
+    const scoreHiddenCols = ['Input Name', 'MP Terms Mapped', 'MP Terms Total'];
 
     // Hide columns
     hideColumnsByName(scoreTable, scoreHiddenCols);
